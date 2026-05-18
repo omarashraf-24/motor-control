@@ -1,165 +1,157 @@
 #!/usr/bin/env python3
 """
-GPS NEO-M8N Test via I2C
+GPS NEO-M8N Test via UART (ttyAMA0)
 Tests latitude/longitude reading from NEO-M8N GPS module
 """
 
 import serial
 import time
-import struct
 
 class NEOM8N:
-    """NEO-M8N GPS Module I2C Interface"""
+    """NEO-M8N GPS Module UART Interface"""
     
-    # I2C Address
-    I2C_ADDR = 0x42
-    
-    # UBX Protocol
-    UBX_SYNC1 = 0xB5
-    UBX_SYNC2 = 0x62
-    
-    # Message Classes
-    NAV_CLASS = 0x01
-    
-    # Message IDs
-    NAV_PVT = 0x07  # Position, Velocity, Time
-    
-    def __init__(self, i2c_bus=1):
-        """Initialize I2C connection to GPS module"""
+    def __init__(self, port='/dev/ttyAMA0', baudrate=9600):
+        """Initialize UART connection to GPS module"""
         try:
-            import smbus2
-            self.bus = smbus2.SMBus(i2c_bus)
+            self.ser = serial.Serial(port, baudrate, timeout=1)
             self.connected = True
-            print(f"✅ Connected to I2C bus {i2c_bus}")
+            print(f"✅ Connected to {port} at {baudrate} baud")
+            time.sleep(1)  # Wait for stabilization
         except Exception as e:
-            print(f"❌ Failed to connect to I2C: {e}")
+            print(f"❌ Failed to connect to {port}: {e}")
             self.connected = False
     
-    def read_raw(self, length=32):
-        """Read raw data from GPS module (max 32 bytes per I2C transaction)"""
+    def parse_nmea(self, sentence):
+        """Parse NMEA sentence and extract latitude"""
         try:
-            # RPi5 I2C has 32-byte limit, read in chunks
-            data = []
-            for offset in range(0, length, 32):
-                chunk_size = min(32, length - offset)
-                chunk = self.bus.read_i2c_block_data(self.I2C_ADDR, offset, chunk_size)
-                data.extend(chunk)
-            return bytes(data)
-        except Exception as e:
-            print(f"❌ I2C Read Error: {e}")
-            return None
-    
-    def parse_ubx_pvt(self, data):
-        """Parse UBX NAV-PVT message"""
-        if len(data) < 28:
-            return None
-        
-        try:
-            # UBX message structure (simplified)
-            # Bytes 0-1: Sync chars (0xB5, 0x62)
-            # Bytes 2-3: Class, ID
-            # Bytes 4-5: Length
-            # Bytes 6+: Payload
+            if not sentence.startswith('$'):
+                return None
             
-            # Extract position data (rough parse)
-            # Latitude at offset 20-23 (degrees * 1e7)
-            # Longitude at offset 24-27 (degrees * 1e7)
+            # Remove checksum
+            if '*' in sentence:
+                sentence = sentence.split('*')[0]
             
-            if data[0] == self.UBX_SYNC1 and data[1] == self.UBX_SYNC2:
-                msg_class = data[2]
-                msg_id = data[3]
-                
-                if msg_class == self.NAV_CLASS and msg_id == self.NAV_PVT:
-                    # Parse latitude and longitude
-                    lat_raw = struct.unpack('<i', data[20:24])[0]
-                    lon_raw = struct.unpack('<i', data[24:28])[0]
+            parts = sentence.split(',')
+            
+            # Parse GGA sentence (Global Positioning System Fix Data)
+            # $GPGGA,time,lat,N/S,lon,E/W,fix,sats,...
+            if 'GGA' in parts[0]:
+                if len(parts) >= 9:
+                    latitude_str = parts[2]
+                    lat_dir = parts[3]
+                    longitude_str = parts[4]
+                    lon_dir = parts[5]
+                    fix_quality = parts[6]
+                    num_sats = parts[7]
                     
-                    latitude = lat_raw / 1e7
-                    longitude = lon_raw / 1e7
-                    
-                    # Satellite count
-                    num_sv = data[35] if len(data) > 35 else 0
-                    
-                    return {
-                        'latitude': latitude,
-                        'longitude': longitude,
-                        'satellites': num_sv,
-                        'raw': data[:32]
-                    }
+                    if latitude_str and longitude_str and fix_quality != '0':
+                        # Parse latitude (DDMM.MMMM format)
+                        lat_deg = float(latitude_str[:2])
+                        lat_min = float(latitude_str[2:])
+                        latitude = lat_deg + lat_min / 60.0
+                        if lat_dir == 'S':
+                            latitude = -latitude
+                        
+                        # Parse longitude (DDDMM.MMMM format)
+                        lon_deg = float(longitude_str[:3])
+                        lon_min = float(longitude_str[3:])
+                        longitude = lon_deg + lon_min / 60.0
+                        if lon_dir == 'W':
+                            longitude = -longitude
+                        
+                        return {
+                            'latitude': latitude,
+                            'longitude': longitude,
+                            'satellites': int(num_sats) if num_sats else 0,
+                            'fix_quality': int(fix_quality),
+                            'raw': sentence
+                        }
         except Exception as e:
-            print(f"⚠️  Parse Error: {e}")
+            pass
         
         return None
     
     def read_position(self):
-        """Read GPS position"""
+        """Read GPS position from UART"""
         if not self.connected:
             return None
         
-        data = self.read_raw(32)
-        if data:
-            return self.parse_ubx_pvt(data)
+        try:
+            if self.ser.in_waiting:
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+                if line:
+                    return self.parse_nmea(line)
+        except Exception as e:
+            print(f"❌ Read Error: {e}")
+        
         return None
     
     def close(self):
-        """Close I2C connection"""
+        """Close UART connection"""
         if self.connected:
-            self.bus.close()
+            self.ser.close()
 
 
 def test_gps():
     """Test GPS module"""
     print("╔════════════════════════════════════════╗")
-    print("║   NEO-M8N GPS Test (I2C)              ║")
+    print("║   NEO-M8N GPS Test (UART/ttyAMA0)    ║")
     print("║   Testing Latitude Reading            ║")
     print("╚════════════════════════════════════════╝\n")
     
-    gps = NEOM8N(i2c_bus=1)
+    gps = NEOM8N(port='/dev/ttyAMA0', baudrate=9600)
     
     if not gps.connected:
         print("❌ Failed to connect to GPS module")
-        print("   Check I2C connection:")
-        print("   - SDA → RPi5 GPIO3 (Pin 5)")
-        print("   - SCL → RPi5 GPIO2 (Pin 3)")
+        print("   Check UART connection:")
+        print("   - RX → RPi5 GPIO15 (Pin 10)")
+        print("   - TX → RPi5 GPIO14 (Pin 8)")
         print("   - GND → RPi5 GND")
-        print("   - VCC → RPi5 3.3V")
+        print("   - VCC → RPi5 3.3V or 5V")
         return
     
     print("📡 Reading GPS data...\n")
     
-    max_attempts = 30
+    max_attempts = 60
     attempts = 0
+    fix_count = 0
     
     while attempts < max_attempts:
         try:
             position = gps.read_position()
             
             if position:
-                print(f"✅ Fix acquired!")
+                fix_count += 1
+                print(f"✅ [{fix_count}] Fix acquired!")
                 print(f"   Latitude:  {position['latitude']:.6f}°")
                 print(f"   Longitude: {position['longitude']:.6f}°")
                 print(f"   Satellites: {position['satellites']}")
-                print(f"\n✅ GPS TEST PASSED\n")
-                break
+                print(f"   Fix Quality: {position['fix_quality']}\n")
+                
+                if fix_count >= 3:
+                    print(f"✅ GPS TEST PASSED - Received {fix_count} valid fixes\n")
+                    break
             else:
-                print(f"⏳ Waiting for GPS fix... ({attempts + 1}/{max_attempts})")
-                time.sleep(1)
-                attempts += 1
+                print(f"⏳ Waiting for GPS fix... ({attempts + 1}/{max_attempts})", end='\r')
+            
+            time.sleep(0.1)
+            attempts += 1
         
         except KeyboardInterrupt:
             print("\n⚠️  Test interrupted")
             break
         except Exception as e:
             print(f"❌ Error: {e}")
-            time.sleep(1)
+            time.sleep(0.5)
             attempts += 1
     
-    if attempts >= max_attempts:
-        print(f"❌ No GPS fix after {max_attempts} attempts")
+    if fix_count == 0:
+        print(f"\n❌ No GPS fix after {max_attempts} attempts")
         print("   Check:")
-        print("   - GPS antenna connected")
-        print("   - I2C address correct (0x42)")
+        print("   - GPS antenna connected and outside")
         print("   - Module powered on")
+        print("   - UART connections secure (RX/TX)")
+        print("   - Correct baud rate (try 115200 if not working)")
     
     gps.close()
 
