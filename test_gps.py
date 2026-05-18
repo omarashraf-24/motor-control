@@ -35,10 +35,15 @@ class NEOM8N:
             print(f"❌ Failed to connect to I2C: {e}")
             self.connected = False
     
-    def read_raw(self, length=100):
-        """Read raw data from GPS module"""
+    def read_raw(self, length=32):
+        """Read raw data from GPS module (max 32 bytes per I2C transaction)"""
         try:
-            data = self.bus.read_i2c_block_data(self.I2C_ADDR, 0xFF, length)
+            # RPi5 I2C has 32-byte limit, read in chunks
+            data = []
+            for offset in range(0, length, 32):
+                chunk_size = min(32, length - offset)
+                chunk = self.bus.read_i2c_block_data(self.I2C_ADDR, offset, chunk_size)
+                data.extend(chunk)
             return bytes(data)
         except Exception as e:
             print(f"❌ I2C Read Error: {e}")
@@ -46,7 +51,7 @@ class NEOM8N:
     
     def parse_ubx_pvt(self, data):
         """Parse UBX NAV-PVT message"""
-        if len(data) < 100:
+        if len(data) < 28:
             return None
         
         try:
@@ -79,10 +84,10 @@ class NEOM8N:
                         'latitude': latitude,
                         'longitude': longitude,
                         'satellites': num_sv,
-                        'raw': data[:50]
+                        'raw': data[:32]
                     }
         except Exception as e:
-            print(f"❌ Parse Error: {e}")
+            print(f"⚠️  Parse Error: {e}")
         
         return None
     
@@ -91,7 +96,7 @@ class NEOM8N:
         if not self.connected:
             return None
         
-        data = self.read_raw()
+        data = self.read_raw(32)
         if data:
             return self.parse_ubx_pvt(data)
         return None
